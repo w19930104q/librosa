@@ -3,6 +3,8 @@
 """Core IO, DSP and utility functions."""
 from __future__ import annotations
 
+import math
+from fractions import Fraction
 from typing import TYPE_CHECKING, overload
 
 import lazy_loader as lazy
@@ -1120,7 +1122,15 @@ def resample(
 
     ratio = float(target_sr) / orig_sr
 
-    n_samples = int(np.ceil(y.shape[axis] * ratio))
+    # Compute the target length as exactly ceil(n * target_sr / orig_sr).
+    # Evaluating this in floating point as ``n * ratio`` can round an
+    # exactly-integer quotient upward (eg 147 samples from 44100 to 48000),
+    # which would otherwise produce one sample too many (and a spurious
+    # padding sample when ``fix=True``).  Exact rational arithmetic keeps
+    # the output length stable for any combination of length and rates.
+    n_samples = math.ceil(
+        Fraction(y.shape[axis]) * Fraction(target_sr) / Fraction(orig_sr)
+    )
 
     if res_type in ("scipy", "fft"):
         import scipy.signal

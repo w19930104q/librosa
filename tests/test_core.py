@@ -14,14 +14,18 @@ except KeyError:
     pass
 
 import sys
+import math
 import soundfile
 import librosa
 import librosa.core
 import librosa.core.spectrum
 import glob
+from fractions import Fraction
+
 import numpy as np
 import scipy.io
 import scipy.signal
+import soxr
 import pytest
 import warnings
 from unittest import mock
@@ -213,6 +217,95 @@ def test_resample_stereo(resample_audio, sr_out, res_type, fix):
     # Check that we're within one sample of target_length = y.shape[-1] * sr_out // sr_in
     target_length = y.shape[-1] * sr_out // sr_in
     assert np.abs(y2.shape[-1] - target_length) <= 1
+
+
+def _resample_identity_length(n, sr_in, sr_out):
+    """Exact value of ceil(n * sr_out / sr_in) (the resampling length identity)."""
+    return math.ceil(Fraction(n) * Fraction(sr_out) / Fraction(sr_in))
+
+
+@pytest.mark.parametrize("res_type", ["soxr_qq", "soxr_lq", "soxr_mq", "soxr_hq", "soxr_vhq"])
+@pytest.mark.parametrize(
+    "shape, axis",
+    [
+        ((1000,), -1),  # mono
+        ((1, 1000), -1),  # single-channel
+        ((2, 1000), -1),  # stereo
+        ((5, 1000), -1),  # multi-channel
+        ((1000, 3), 0),  # time along the first axis
+        ((2, 3, 1000), -1),  # multi-channel, 3-dimensional
+    ],
+)
+@pytest.mark.parametrize(
+    "sr_in, sr_out", [(22050, 16000), (16000, 22050), (44100, 48000)]
+)
+def test_resample_soxr_channel_order(shape, axis, sr_in, sr_out, res_type):
+    # Regression test: soxr resampling must preserve shape and channel
+    # order for mono and multi-channel inputs of any shape
+    n = shape[axis]
+
+    # Fixed synthetic signal: a distinct tone for each slice along the
+    # target axis, so that any channel scrambling is detectable
+    y = np.zeros(shape, dtype=np.float32)
+    y_slices = np.moveaxis(y, axis, -1)
+    t = np.arange(n) / float(sr_in)
+    for k, idx in enumerate(np.ndindex(y_slices.shape[:-1])):
+        y_slices[idx] = np.sin(2 * np.pi * (220 + 110 * k) * t)
+    y = np.moveaxis(y_slices, -1, axis)
+
+    y_hat = librosa.resample(
+        y, orig_sr=sr_in, target_sr=sr_out, res_type=res_type, axis=axis
+    )
+
+    # The output must satisfy the resampling length identity exactly
+    n_target = _resample_identity_length(n, sr_in, sr_out)
+    assert y_hat.ndim == y.ndim
+    assert y_hat.shape[axis] == n_target
+
+    # Each output slice must match an independent soxr resample of the
+    # corresponding input slice (ie, channels are not reordered)
+    y_hat_slices = np.moveaxis(y_hat, axis, -1)
+    for idx in np.ndindex(y_slices.shape[:-1]):
+        y_ref = soxr.resample(y_slices[idx], sr_in, sr_out, quality=res_type)
+        y_ref = librosa.util.fix_length(y_ref, size=n_target)
+        assert np.allclose(y_hat_slices[idx], y_ref, atol=1e-6)
+
+
+@pytest.mark.parametrize("res_type", ["soxr_qq", "soxr_lq", "soxr_mq", "soxr_hq", "soxr_vhq"])
+@pytest.mark.parametrize(
+    "sr_in, sr_out, n",
+    [
+        # Exact-integer quotients that naive floating-point evaluation
+        # of n * (sr_out / sr_in) rounds upward
+        (44100, 48000, 147),
+        (44100, 48000, 44100),
+        (48000, 44100, 48000),
+        (3, 7, 27),
+        (3, 7, 12345),
+        (7, 3, 1000),
+        # Ordinary up- and down-sampling
+        (22050, 16000, 1000),
+        (16000, 22050, 999),
+        (22050, 11025, 4096),
+        (8000, 44100, 501),
+    ],
+)
+@pytest.mark.parametrize("n_channels", [1, 2, 4])
+def test_resample_soxr_length_identity(sr_in, sr_out, n, n_channels, res_type):
+    # Regression test: the output length must satisfy the resampling
+    # identity ceil(n * sr_out / sr_in) exactly, for mono and multi-channel
+    rng = np.random.default_rng(0)
+    y = rng.standard_normal((n_channels, n)).astype(np.float32)
+
+    y_hat = librosa.resample(y, orig_sr=sr_in, target_sr=sr_out, res_type=res_type)
+
+    n_target = _resample_identity_length(n, sr_in, sr_out)
+    assert y_hat.shape == (n_channels, n_target)
+
+    # Mono input must behave identically
+    y_mono = librosa.resample(y[0], orig_sr=sr_in, target_sr=sr_out, res_type=res_type)
+    assert y_mono.shape == (n_target,)
+    assert np.allclose(y_hat[0], y_mono, atol=1e-6)
 
 
 @pytest.mark.parametrize(
