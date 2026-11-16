@@ -134,6 +134,62 @@ def test_time_stretch_pitch_shift_pad_mode(ysr, pad_mode):
         assert not np.allclose(ys, ys_const)
 
 
+@pytest.mark.parametrize("n_fft", [512, 1024, 2048, 4096])
+@pytest.mark.parametrize("rate", [0.8, 1.25])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_time_stretch_inverse_consistency(n_fft, rate, dtype):
+    # Stretching by `rate` and then by `1/rate` must recover the
+    # original tempo (sample length) and preserve pitch content,
+    # independently of n_fft and dtype
+    sr = 22050
+    y = np.sin(2 * np.pi * 440 * np.arange(2 * sr) / sr).astype(dtype)
+
+    y_stretch = librosa.effects.time_stretch(y, rate=rate, n_fft=n_fft)
+
+    # The transform is deterministic: repeated calls are bit-identical
+    y_stretch2 = librosa.effects.time_stretch(y, rate=rate, n_fft=n_fft)
+    assert np.array_equal(y_stretch, y_stretch2)
+
+    # Stretched length is determined exactly by the rate
+    assert len(y_stretch) == round(len(y) / rate)
+
+    y_rec = librosa.effects.time_stretch(y_stretch, rate=1 / rate, n_fft=n_fft)
+
+    # Tempo is restored: the round trip recovers the input length
+    assert len(y_rec) == len(y)
+
+    # Pitch is stable: chroma of the recovered signal matches the original
+    chroma_orig = librosa.feature.chroma_stft(y=y, sr=sr)
+    chroma_rec = librosa.feature.chroma_stft(y=y_rec, sr=sr)
+    similarity = np.sum(chroma_orig * chroma_rec) / (
+        np.linalg.norm(chroma_orig) * np.linalg.norm(chroma_rec)
+    )
+    assert similarity > 0.99
+
+
+@pytest.mark.parametrize("n_fft", [512, 1024, 2048, 4096])
+@pytest.mark.parametrize("n_steps", [-3, 2])
+def test_pitch_shift_inverse_consistency(n_fft, n_steps):
+    # Shifting up and then back down must recover the original
+    # length and pitch content, independently of n_fft
+    sr = 22050
+    y = np.sin(2 * np.pi * 440 * np.arange(2 * sr) / sr).astype(np.float32)
+
+    y_shift = librosa.effects.pitch_shift(y, sr=sr, n_steps=n_steps, n_fft=n_fft)
+    y_rec = librosa.effects.pitch_shift(y_shift, sr=sr, n_steps=-n_steps, n_fft=n_fft)
+
+    # Length is preserved through the round trip
+    assert len(y_rec) == len(y)
+
+    # Pitch content returns to the original chroma
+    chroma_orig = librosa.feature.chroma_stft(y=y, sr=sr)
+    chroma_rec = librosa.feature.chroma_stft(y=y_rec, sr=sr)
+    similarity = np.sum(chroma_orig * chroma_rec) / (
+        np.linalg.norm(chroma_orig) * np.linalg.norm(chroma_rec)
+    )
+    assert similarity > 0.99
+
+
 @pytest.mark.parametrize("align_zeros", [False, True])
 def test_remix_mono(align_zeros):
 

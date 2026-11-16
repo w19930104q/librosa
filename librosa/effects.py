@@ -480,6 +480,14 @@ def time_stretch(
     if rate <= 0:
         raise ParameterError("rate must be a positive number")
 
+    # Resolve framing defaults so that the output frame grid can be
+    # fixed explicitly below
+    if win_length is None:
+        win_length = n_fft
+
+    if hop_length is None:
+        hop_length = int(win_length // 4)
+
     # Construct the short-term Fourier transform (STFT)
     stft = core.stft(
         y,
@@ -491,11 +499,27 @@ def time_stretch(
         pad_mode=pad_mode,
     )
 
-    # Stretch by phase vocoding
-    stft_stretch = core.phase_vocoder(stft, rate=rate)
-
     # Predict the length of y_stretch
     len_stretch = round(y.shape[-1] / rate)
+
+    if center:
+        # Fix the output frame grid to the target length, mirroring how
+        # stft would frame a signal of length `len_stretch`.  This makes
+        # stretching by `rate` and then by `1/rate` traverse exactly
+        # reciprocal frame boundaries, independently of n_fft.
+        n_frames_out = 1 + len_stretch // hop_length
+
+        # Output frame t draws from input position t * rate.  Clip the
+        # final frame to guard against rounding overshoot at the boundary.
+        t_out = np.arange(n_frames_out, dtype=float) * rate
+        np.minimum(t_out, stft.shape[-1] - 1, out=t_out)
+    else:
+        # Without center padding, the input frames do not cover the
+        # tail of a slowed-down signal; keep the legacy input-driven grid
+        t_out = np.arange(0.0, stft.shape[-1], rate)
+
+    # Stretch by phase vocoding
+    stft_stretch = core.phase_vocoder(stft, t_out=t_out)
 
     # Invert the STFT
     y_stretch = core.istft(
